@@ -1,6 +1,6 @@
 package task2
 
-import org.apache.log4j.{LogManager, PropertyConfigurator}
+import org.apache.log4j.{LogManager, Logger, PropertyConfigurator}
 import org.apache.spark.sql.SparkSession
 import org.elasticsearch.spark._
 import shared.{DataModel, LoaderUtils}
@@ -8,11 +8,10 @@ import shared.{DataModel, LoaderUtils}
 import scala.util.{Success, Try}
 
 
-
 object BatchDataLoader {
 
   PropertyConfigurator.configure("src/main/resources/log4j.properties")
-  val log = LogManager.getRootLogger()
+  val log: Logger = LogManager.getRootLogger
 
   def main(args: Array[String]) {
 
@@ -21,7 +20,7 @@ object BatchDataLoader {
       .master("local")
       .appName("Spark DataLoader application")
       .config("es.index.auto.create", "true")
-      .config("es.resource", "flight/rows")
+      .config("es.resource", "flight_price/rows")
       .config("es.batch.size.bytes", "1mb")
       .config("es.batch.size.entries", 1000)
       .config("spark.driver.memory", "4g")
@@ -37,64 +36,72 @@ object BatchDataLoader {
     val flightData = spark.sparkContext.textFile("src/main/resources/part-00000.gz").
       map(s => new DataModel(s.split("\t", -1))).repartition(2) //.cache())
 
-    //flightData.take(10).foreach(println)
+    // flightData.take(10).foreach(println)
     // flightData.toDF().printSchema
 
     log.info("Reading csv file.")
-    val rowCount = LoaderUtils.time{flightData.count()}
-    log.info("Got " + rowCount + " rows.")
+    var (timeDiff, rowCount) = LoaderUtils.time {
+      flightData.count()
+    }
+    log.info("Got " + rowCount + " rows. Avg row/sec is " + rowCount / timeDiff)
 
     log.info("Number of original partitions: " + flightData.getNumPartitions.toString)
-    log.info("Partitions size: " + flightData.partitions.size)
+    log.info("Partitions size: " + flightData.partitions.length)
 
     log.info("Calculating list of weeks")
-    val weeks = LoaderUtils.time{flightData.toDF().select("observation_week").distinct.map(r => r(0).asInstanceOf[Int]).
-      collect().toList.sorted}
+    val weeks = flightData.toDF().select("observation_week").distinct.map(r => r(0).asInstanceOf[Int]).
+      collect().toList.sorted
 
     log.info("Weeks length: " + weeks.length)
 
-    /*
-    for (week <- weeks) {
+
+    val iterNbr = 2
+    for (week <- weeks.dropRight(15).takeRight(iterNbr)) {
+      log.info("Processing week " + week)
       val filteredFlightData = flightData.filter(record => record.observation_week == week)
-      filteredFlightData.saveToEs("flight-{observation_week}/rows")
-    }
-    */
-    //for (week <- weeks) {
-      val week = weeks(100)
-      val filteredFlightData = flightData.filter(record => record.observation_week == week)
+      rowCount = filteredFlightData.count()
 
-      val convertedFlightData = filteredFlightData.mapPartitions(
-        iter => {
+      val (timeDiff2, _) = LoaderUtils.time {
+         val convertedFlightData = filteredFlightData.mapPartitions(
+          iter => {
 
-          // TODO here should be HTTPClient initialization - not working
+            // TODO here should be HTTPClient initialization - not working
 
-          val updatedIter = iter.map(
-            item => {
+            val updatedIter = iter.map(
+              item => {
                 Try(LoaderUtils.getConvertedCurrency(item.trip_price_avg))
-                .transform(
-                      { b => Success(Right(item.copy(trip_price_avg_2 = b))) },
-                      { e => Success(Left(item.copy(trip_price_avg_2 = -1.0))) }
+                  .transform(
+                    { b =>
+                      // log.info("Price: " + item.trip_price_avg + ". Converted: " + b)
+                      Success(Right(item.copy(trip_price_avg_2 = b)))
+                    },
+                    { e =>
+                      // log.info("Got exception while converting the price")
+                      Success(Left(item.copy(trip_price_avg_2 = -1.0)))
+                    } // just to mark failure
                   ).get
-              //item.copy(trip_price_avg_2 = convertedPrice)
-            }
-          )
+                //item.copy(trip_price_avg_2 = convertedPrice)
+              }
+            )
 
-          // TODO here should be HTTPClient shutdown
+            // TODO here should be HTTPClient shutdown
 
-          updatedIter
-        })
+            updatedIter
+          })
 
-      convertedFlightData
-    .filter(el => el.isRight)
-      .map(el => el.right.get)
-      .saveToEs("flight-{observation_week}/rows")
-    convertedFlightData
-      .filter(el => el.isLeft)
-      .map(el => el.left.get)
-      .saveToEs("flight-{observation_week}/rows")
+        // different processing for 2 data streams - save it both for now
+        convertedFlightData
+          .filter(el => el.isRight)
+          .map(el => el.right.get)
+          .saveToEs("flight_price-{observation_week}/rows")
+        convertedFlightData
+          .filter(el => el.isLeft)
+          .map(el => el.left.get)
+          .saveToEs("flight_price-{observation_week}/rows")
+      }
+      log.info("Avg row/sec is " + rowCount / timeDiff2)
+    }
 
-
-    //}
     // filteredFlightData.saveToEs("flight-{observation_week}/rows")
 
     System.in.read

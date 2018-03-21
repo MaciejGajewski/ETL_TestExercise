@@ -1,16 +1,15 @@
 package task1
 
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.log4j.{LogManager, Logger, PropertyConfigurator}
+import org.apache.spark.sql.SparkSession
 import org.elasticsearch.spark._
-import org.apache.log4j.LogManager
-import org.apache.log4j.PropertyConfigurator
 import shared.{DataModel, LoaderUtils}
 
 
 object SimpleDataLoader {
 
   PropertyConfigurator.configure("src/main/resources/log4j.properties")
-  val log = LogManager.getRootLogger()
+  val log: Logger = LogManager.getRootLogger
 
   def main(args: Array[String]) {
 
@@ -35,40 +34,42 @@ object SimpleDataLoader {
     val flightData = spark.sparkContext.textFile("src/main/resources/part-00000.gz").
         map(s => new DataModel(s.split("\t", -1))).repartition(2) //.cache())
 
-    //flightData.take(10).foreach(println)
+    // flightData.take(10).foreach(println)
     // flightData.toDF().printSchema
 
     log.info("Reading csv file.")
-    val rowCount = LoaderUtils.time{flightData.count()}
-    log.info("Got " + rowCount + " rows.")
+    val (timeDiff, rowCount) = LoaderUtils.time{flightData.count()}
+    log.info("Got " + rowCount + " rows. Avg row/sec is " + rowCount/timeDiff)
 
     log.info("Number of original partitions: " + flightData.getNumPartitions.toString)
-    log.info("Partitions size: " + flightData.partitions.size)
+    log.info("Partitions size: " + flightData.partitions.length)
 
     log.info("Saving data to ElasticSearch to single index")
-    //LoaderUtils.time{flightData.saveToEs("flight/rows")} // this is OK 15 min for part-000000.gz file but without buckets
+    //val (timeDiff2, _) = LoaderUtils.time{flightData.saveToEs("flight/rows")} // this is OK 15 min for part-000000.gz file but without buckets
+    //log.info("Avg row/sec is " + rowCount/timeDiff2)
 
     //flightData.saveToEs("flight-{observation_week}/rows") // this take ages, killed after 2 hrs for 2 part files
 
     log.info("Calculating list of weeks")
-    val weeks = LoaderUtils.time{flightData.toDF().select("observation_week").distinct.map(r => r(0).asInstanceOf[Int]).
-      collect().toList.sorted}
+    val weeks = flightData.toDF().select("observation_week").distinct.map(r => r(0).asInstanceOf[Int]).
+      collect().toList.sorted
 
     log.info("Weeks length: " + weeks.length)
 
     log.info("Saving data to ElasticSearch partitioned by week")
-    val iterNbr = 5
-    for (week <- weeks.take(iterNbr)) {
+    val iterNbr = 1
+    for (week <- weeks.dropRight(15).takeRight(iterNbr)) {     // take some weeks close to end
       log.info("Week number " + week)
       log.info("Filtering")
       val filteredFlightData = flightData.filter(record => record.observation_week == week)
-      val count = LoaderUtils.time{filteredFlightData.count()}
+      val count = filteredFlightData.count()
       log.info("Filtered count " + count)
 
       log.info("Saving")
-      LoaderUtils.time {
+      val (timeDiff3, _) = LoaderUtils.time {
         filteredFlightData.saveToEs("flight2-{observation_week}/rows")
       }
+      log.info("Avg row/sec is " + count/timeDiff3)
     }
 
     System.in.read

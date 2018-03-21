@@ -69,6 +69,10 @@ case class DataModel (
     0.0
   )
 
+  def convertNulls(value: Any): Any = {
+    if (value == None) "n/a" else value
+  }
+
   def canEqual(that: Any) = that.isInstanceOf[DataModel]
 
   def productArity = 31
